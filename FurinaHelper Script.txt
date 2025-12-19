@@ -1,0 +1,143 @@
+delete window.$;
+if (window.wpRequire) delete window.wpRequire;
+for (let i = 1; i < 9999; i++) { clearInterval(i); clearTimeout(i); }
+
+/* ---------- быстрый сбор нужных модулей ---------- */
+var wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
+webpackChunkdiscord_app.pop();
+
+var ApplicationStreamingStore = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getStreamerActiveStreamMetadata).exports.Z;
+var RunningGameStore        = Object.values(wpRequire.c).find(x => x?.exports?.ZP?.getRunningGames).exports.ZP;
+var QuestsStore             = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getQuest).exports.Z;
+var ChannelStore            = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getAllThreadsForParent).exports.Z;
+var GuildChannelStore       = Object.values(wpRequire.c).find(x => x?.exports?.ZP?.getSFWDefaultChannel).exports.ZP;
+var FluxDispatcher          = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.flushWaitQueue).exports.Z;
+var api                     = Object.values(wpRequire.c).find(x => x?.exports?.tn?.get).exports.tn;
+
+/* ---------- ищем активный квест ---------- */
+var quest = [...QuestsStore.quests.values()].find(
+    q => q.id !== "1412491570820812933" &&
+         q.userStatus?.enrolledAt &&
+         !q.userStatus?.completedAt &&
+         new Date(q.config.expiresAt).getTime() > Date.now()
+);
+var isApp = typeof DiscordNative !== "undefined";
+
+if (!quest) {
+    console.log("Обход квеста не требуется.");
+} else {
+    console.log("Обход квеста начался!");
+    var pid           = Math.floor(Math.random() * 30000) + 1000;
+    var applicationId = quest.config.application.id;
+    var applicationName = quest.config.application.name;
+    var questName     = quest.config.messages.questName;
+    var taskConfig    = quest.config.taskConfig ?? quest.config.taskConfigV2;
+    var taskName      = ["WATCH_VIDEO","PLAY_ON_DESKTOP","STREAM_ON_DESKTOP","PLAY_ACTIVITY","WATCH_VIDEO_ON_MOBILE"].find(t => taskConfig.tasks[t]);
+    var secondsNeeded = taskConfig.tasks[taskName].target;
+    var secondsDone   = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+
+    /* WATCH_VIDEO / WATCH_VIDEO_ON_MOBILE  (7-сек шаг, 1-сек цикл) */
+    if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
+        (async function () {
+            var enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
+            var maxFuture = 10, speed = 7, interval = 1;
+            var completed = false;
+            while (true) {
+                var maxAllowed = Math.floor((Date.now() - enrolledAt)/1000) + maxFuture;
+                var diff = maxAllowed - secondsDone;
+                var timestamp = secondsDone + speed;
+                if (diff >= speed) {
+                    var res = await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: Math.min(secondsNeeded, timestamp + Math.random())}});
+                    completed = res.body.completed_at != null;
+                    secondsDone = Math.min(secondsNeeded, timestamp);
+                }
+                if (timestamp >= secondsNeeded) break;
+                await new Promise(resolve => setTimeout(resolve, interval * 1000));
+            }
+            if (!completed) await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: secondsNeeded}});
+            console.log("Обход квеста закончился!");
+        })();
+    }
+    /* PLAY_ON_DESKTOP  (heartbeat 5 с) */
+    else if (taskName === "PLAY_ON_DESKTOP") {
+        if (!isApp) {
+            console.log("Обход квеста не требуется.");
+        } else {
+            api.get({url: `/applications/public?application_ids=${applicationId}`}).then(res => {
+                var appData = res.body[0];
+                var exeName = appData.executables.find(x => x.os === "win32").name.replace(">","");
+                var fakeGame = {
+                    cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+                    exeName,
+                    exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+                    hidden: false,
+                    isLauncher: false,
+                    id: applicationId,
+                    name: appData.name,
+                    pid: pid,
+                    pidPath: [pid],
+                    processName: appData.name,
+                    start: Date.now(),
+                };
+                var realGames = RunningGameStore.getRunningGames();
+                var fakeGames = [fakeGame];
+                var realGetRunningGames = RunningGameStore.getRunningGames;
+                var realGetGameForPID   = RunningGameStore.getGameForPID;
+                RunningGameStore.getRunningGames = () => fakeGames;
+                RunningGameStore.getGameForPID   = (pid) => fakeGames.find(x => x.pid === pid);
+                FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: fakeGames});
+
+                var fn = data => {
+                    var progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
+                    if (progress >= secondsNeeded) {
+                        RunningGameStore.getRunningGames = realGetRunningGames;
+                        RunningGameStore.getGameForPID   = realGetGameForPID;
+                        FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: []});
+                        FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+                        clearInterval(hb);
+                        console.log("Обход квеста закончился!");
+                    }
+                };
+                FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+                var hb = setInterval(() => FluxDispatcher.dispatch({type: "QUESTS_SEND_HEARTBEAT"}), 5000);
+            });
+        }
+    }
+    /* STREAM_ON_DESKTOP  (heartbeat 5 с) */
+    else if (taskName === "STREAM_ON_DESKTOP") {
+        if (!isApp) {
+            console.log("Обход квеста не требуется.");
+        } else {
+            var realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+            ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({id: applicationId, pid, sourceName: null});
+            var fn = data => {
+                var progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+                if (progress >= secondsNeeded) {
+                    ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
+                    FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+                    clearInterval(hb);
+                    console.log("Обход квеста закончился!");
+                }
+            };
+            FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+            var hb = setInterval(() => FluxDispatcher.dispatch({type: "QUESTS_SEND_HEARTBEAT"}), 5000);
+        }
+    }
+    /* PLAY_ACTIVITY  (heartbeat 5 с) */
+    else if (taskName === "PLAY_ACTIVITY") {
+        (async function () {
+            var channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x != null && x.VOCAL.length > 0).VOCAL[0].channel.id;
+            var streamKey = `call:${channelId}:1`;
+            while (true) {
+                var res = await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: false}});
+                var progress = res.body.progress.PLAY_ACTIVITY.value;
+                if (progress >= secondsNeeded) {
+                    await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: true}});
+                    console.log("Обход квеста закончился!");
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 5000));   // ускорено до 5 с
+            }
+        })();
+    }
+}
