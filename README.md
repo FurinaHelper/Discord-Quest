@@ -220,5 +220,5 @@ if(quests.length === 0) {
 ---
 
 <div align="center">
-  <sub>Скрипт предназначен для ознакомительных целей. Made with ❤️</sub>
+  <sub></sub>
 </div>
